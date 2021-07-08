@@ -1,1 +1,1 @@
-# powervs-cicd
+# This project contains jobs for PowerVS management of resources

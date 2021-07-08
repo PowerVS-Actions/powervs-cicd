@@ -1,0 +1,75 @@
+pipeline {
+  agent any
+  parameters {
+	    text(defaultValue: '''Instance-1
+        Instance-2
+        Instance-3''', name: 'instance_list', description: 'List of instances in which images are to be uploaded. Separated by new line')
+	    choice(name: 'Tier', choices: ['tier3', 'tier1'], description: 'Choose image tier')
+	    choice(name: 'Bucket', choices: ['ocp4-prod-images', 'ocp4-images-bucket'], description: 'Choose image bucket')
+     	text(defaultValue: '''rhcos-48-07052021.ova.gz
+        rhel-83-03192021.ova.gz
+        centos-83-03222021.ova.gz''', name: 'image_list',
+	    description: 'List of instances in which images(ova.gz) are to be uploaded.Separated by new line Refer: https://github.ibm.com/redstack-power/docs/wiki/PowerVS-latest-Images')
+  }
+  environment {
+	    IBMCLOUD_API_KEY = credentials('IBMCLOUD_API_KEY')
+        PVSADM_VERSION="v0.1.2"
+  }
+  stages {
+        stage('Import Image') {
+            steps {
+                script {
+                    try {
+			            writeFile file: 'powervs_bucket', text: "${params.Bucket.trim()}"
+			            writeFile file: 'powervs_tier', text: "${params.Tier.trim()}"
+                        def text=""
+                        params.instance_list.split("\n").each {
+                           instance -> text=text + "${instance.trim()}" + "\n"
+                        }
+                        writeFile file: 'powervs_instance_list.txt', text: text+"\n"
+			            text=""
+                        params.image_list.split("\n").each {
+                           image -> text=text + "${image.trim()}" + "\n"
+                        }
+                        writeFile file: 'powervs_image_list.txt', text: text+"\n"
+                        sh '''
+                            OUTPUT_LOG_FILE="image_import_output.txt"
+                            curl -sL https://raw.githubusercontent.com/ppc64le-cloud/pvsadm/master/get.sh | VERSION=${PVSADM_VERSION} FORCE=1 bash; pvsadm version
+                            while IFS= read -r SERV_NAME; do
+                                if ! [ -z "$SERV_NAME" ];then
+                                    echo "---------------- $SERV_NAME ----------------" >> $OUTPUT_LOG_FILE
+                                    cat powervs_image_list.txt | while read IMAGE_NAME
+                                    do
+                                        if ! [ -z "$IMAGE_NAME" ];then
+                                            tier=$(cat powervs_tier)
+                                            if [ "$tier" = "tier1" ]; then
+                                                image=$(echo $IMAGE_NAME | sed  's/\\.ova\\.gz/-tier1/g')
+                                            else
+                                                image=$(echo $IMAGE_NAME | sed  's/\\.ova\\.gz//g')
+                                            fi
+                                            if ! pvsadm image import -n ${SERV_NAME} -b $(cat powervs_bucket) -r "us-south" --pvs-image-name $image -o ${IMAGE_NAME} --pvs-storagetype $(cat powervs_tier) ; then
+                                                echo "${IMAGE_NAME} Failure " >> $OUTPUT_LOG_FILE
+                                            else
+                                                echo "${IMAGE_NAME} Success " >> $OUTPUT_LOG_FILE
+                                            fi
+                                        fi
+                                    done
+                                fi
+                            done <powervs_instance_list.txt
+                        '''
+                    }
+                    catch (err) {
+                        echo 'Error ! Image Import Failed!'
+                        throw err
+                    }
+                }
+            }
+        }
+  }
+  post {
+    always {
+        archiveArtifacts allowEmptyArchive: true, artifacts: 'image_import_output.txt', fingerprint: true, onlyIfSuccessful: true
+	    cleanWs()
+    }
+  }
+}
